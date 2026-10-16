@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <signal.h>
 
 #define MAX_LINE 80       /* Maximum command size (80 chars), including room for '\0'. */
 #define MAX_COMMANDS 9    /* Number of commands stored in history. */
@@ -26,6 +27,14 @@ char history[MAX_COMMANDS][MAX_LINE];
 /* Number of commands successfully added to history since startup. */
 int command_count = 0;
 
+//extra credit funcs
+void handle_sigchld(int sig){
+	(void)sig; // didnt wanna get error due to -Wall in compile so just casted the sig var to void, hope this is okay (not that it should make a diff)
+	int saved_errno = errno;
+	while (waitpid(-1, NULL, WNOHANG) > 0); //loop and reap all terminated children
+	errno = saved_errno;
+}
+
 /**
  * Add the most recent command to history.
  *
@@ -35,8 +44,9 @@ int command_count = 0;
  * - A circular-array approach is recommended.
  */
 void addtohistory(char inputBuffer[]) {
-	/* TODO Part II: update history and command_count. */
-
+	int index = command_count % MAX_COMMANDS;
+	strcpy(history[index], inputBuffer);
+	command_count++;	
 	return;
 }
 
@@ -100,6 +110,37 @@ int setup(char inputBuffer[], char *args[], int *background) {
      *
      * Invalid history requests should print an error and return SETUP_SKIP.
     */
+
+	int total_stored = command_count < MAX_COMMANDS ? command_count : MAX_COMMANDS;
+
+	if (inputBuffer[0] == '!') {
+		if (inputBuffer[1] == '!') {
+			if (total_stored == 0) {
+				printf("No commands in history.\n");
+				return SETUP_SKIP;
+			}
+			int idx = (command_count - 1) % MAX_COMMANDS;
+			strcpy(inputBuffer, history[idx]);
+		}
+		else if (isdigit(inputBuffer[1])) {
+			int n = inputBuffer[1] - '0';
+			if (n == 0 || n > total_stored){
+				printf("No such command in history.\n");
+				return SETUP_SKIP;
+			}
+			int idx = (command_count - n) % MAX_COMMANDS;
+			strcpy(inputBuffer, history[idx]);
+		} else {
+			printf("No such command in history.\n");
+			return SETUP_SKIP;
+		}
+		printf("%s\n", inputBuffer);
+		length = strlen(inputBuffer);
+	}
+
+	if (strncmp(inputBuffer, "exit", 4) != 0) {
+		addtohistory(inputBuffer);
+	}
 	
     /**
      * Part II — Add to History
@@ -108,7 +149,6 @@ int setup(char inputBuffer[], char *args[], int *background) {
      * If !! or !N was used, add the recalled command rather than the
      * literal history request.
      */
-    /* TODO Part II: add the command to history when appropriate. */
 
 	/**
 	 * Part I — Parse inputBuffer
@@ -120,17 +160,27 @@ int setup(char inputBuffer[], char *args[], int *background) {
 	 * Store the address of the first character of each argument in args.
 	 */
 
+	int arg_index = 0;
+	int in_arg = 0;
+
 	for (i = 0; i < length; i++) {
 		switch (inputBuffer[i]) {
 			case ' ':
 			case '\t':
-				break;
 			case '\n':
+				inputBuffer[i] = '\0';
+				in_arg = 0;
 				break;
 			default:
+				if (!in_arg){
+					args[arg_index++] = &inputBuffer[i];
+					in_arg = 1;
+				}
 				break;
 		}
 	}
+	args[arg_index] = NULL;
+
     /*
     * TODO Part I:
     * - return SETUP_SKIP if no arguments were entered
@@ -139,6 +189,15 @@ int setup(char inputBuffer[], char *args[], int *background) {
     * - terminate args with NULL,
     */
 
+	if (arg_index == 0){
+		return SETUP_SKIP;
+	}
+
+	if (arg_index > 0 && strcmp(args[arg_index - 1], "&") == 0){
+		*background = 1;
+		args[arg_index - 1] = NULL;
+		arg_index--;
+	}
 
 	return SETUP_EXECUTE;
 }
@@ -149,6 +208,16 @@ int main(void) {
 	int background;
 	int setup_result;
 	pid_t child;
+
+	// bonus stuff: register sigchld handler to reap background zombies
+	struct sigaction sa;
+	sa.sa_handler = handle_sigchld;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+	if (sigaction(SIGCHLD, &sa, NULL) < 0) {
+		perror("sigaction failed");
+		exit(EXIT_FAILURE);
+	}
 
 	while (1) {
 		background = 0;
@@ -168,7 +237,10 @@ int main(void) {
          *
          * If the command is exactly "exit", terminate the shell normally.
          */
-        // TODO Part I: handle exit. 
+
+		if (args[0] != NULL && strcmp(args[0], "exit") == 0) {
+			break;
+		}
 
 
 		/**
@@ -176,7 +248,15 @@ int main(void) {
 		 *
 		 * If the command is exactly "history": 
         */
-		// TODO Part II: display history.
+
+		if(args[0] != NULL && strcmp(args[0], "history") == 0) {
+			int total_stored = command_count < MAX_COMMANDS ? command_count : MAX_COMMANDS;
+			for (int k = 1; k <= total_stored; k++) {
+				int idx = (command_count - k) % MAX_COMMANDS;
+				printf("%d %s\n", k, history[idx]);
+			}
+			continue;
+		}
 
 		/**
 		 * Part I — fork / exec / wait
@@ -189,8 +269,24 @@ int main(void) {
 		 *            for this child using waitpid(). If background == 1, do not
 		 *            wait before returning to the prompt.
 		 */
-		// TODO Part I: create and handle the child process. 
-        
+
+		child = fork();
+		
+		if (child < 0){
+			// fork failed
+			perror("fork failed");
+			exit(EXIT_FAILURE);
+		} else if (child == 0){
+			if (execvp(args[0], args) < 0){
+				perror("execvp failed");
+				exit(EXIT_FAILURE);
+			}
+		} else {
+			if (background == 0) {
+				// wait for if this child is running in foreground
+				waitpid(child, NULL, 0);
+			}
+		}
 	}
 
 	return 0;
